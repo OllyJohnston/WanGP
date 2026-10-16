@@ -18,6 +18,8 @@ from shared.prompt_enhancer import chaining as prompt_enhancer_chaining
 from shared.prompt_enhancer import labels as prompt_enhancer_labels
 from shared import resolutions as resolution_utils
 from shared.utils import files_locator as fl
+from shared.utils import model_def_inherit
+from shared.utils import model_scan_provider
 
 
 FINETUNES_DIR = "finetunes"
@@ -649,6 +651,32 @@ def refresh_auto_id(deps: FinetuneEditorDeps, state, mode, original_id, source_m
     return gr.update(interactive=True) if update_interactivity else gr.update()
 
 
+def _seed_scanned_model_values(deps: FinetuneEditorDeps, model_for_values: dict, current_model_type: str, source_model_type: str) -> dict:
+    """Seed main path/identity for an in-memory scanned model (its JSON file does not exist yet).
+
+    Only the main checkpoint path and the display identity are seeded; component fields
+    (text encoder, VAE, URLs2) are deliberately left untouched so the finetune inherits
+    the architecture defaults rather than the handler-supplied component URLs.
+    """
+    current_def = deps.get_model_def(current_model_type) or {}
+    if not model_scan_provider.is_scanned_model_def(current_def):
+        return model_for_values
+    seeded = model_def_inherit.seed_missing_fields(
+        model_for_values,
+        [current_model_type, source_model_type],
+        deps.get_model_def,
+        fields=("name", "description"),
+    )
+    local_path = str(
+        current_def.get(model_scan_provider.SCAN_PATH_KEY)
+        or (current_def.get("metadata") or {}).get("local_path")
+        or ""
+    ).strip()
+    if local_path and not seeded.get("URLs"):
+        seeded["URLs"] = [local_path]
+    return seeded
+
+
 def open_editor(deps: FinetuneEditorDeps, state, source_model_type_override=None):
     current_model_type = str(source_model_type_override or "").strip() or deps.get_state_model_type(state)
     editor_mode = is_finetune_model(deps, current_model_type)
@@ -657,6 +685,10 @@ def open_editor(deps: FinetuneEditorDeps, state, source_model_type_override=None
     source_model_type = _source_model_type(deps, current_model_type)
     raw_source, _ = _load_model_json(deps, source_model_type)
     model_for_values = copy.deepcopy((raw_current if editor_mode else raw_source).get("model", {}))
+    # Scanned (in-memory) models have no JSON on disk yet, so seed the main checkpoint path and
+    # its identity from the live definition. Component fields (text encoder, URLs2) are left
+    # empty so the finetune keeps inheriting the architecture defaults instead of baking them in.
+    model_for_values = _seed_scanned_model_values(deps, model_for_values, current_model_type, source_model_type)
     title = "Finetune Editor" if editor_mode else "Finetune Creator"
     editable_fields = _editable_url_fields(deps, source_model_type, raw_source)
     field_values = {field: _format_list(model_for_values.get(field, [])) for field in FINETUNE_URL_FIELDS}
@@ -859,6 +891,9 @@ def delete_finetune(deps: FinetuneEditorDeps, state, original_id, source_model_t
     if not original_id or not is_finetune_model(deps, original_id):
         gr.Info("This model is not a finetune and cannot be deleted.")
         return _no_delete_action_updates()
+    if model_scan_provider.is_scanned_model_def(deps.get_model_def(original_id)):
+        gr.Info("This model was found by the folder scan and cannot be deleted here. Remove the file from the scanned folder, or turn off scanning, instead.")
+        return _no_delete_action_updates()
     json_path = _finetune_json_path(original_id)
     finetune_label = _finetune_label(original_id, name)
     if os.path.exists(json_path):
@@ -886,7 +921,8 @@ def _source_model_type(deps: FinetuneEditorDeps, model_type: str) -> str:
 def _load_model_json(deps: FinetuneEditorDeps, model_type: str):
     model_def = deps.get_model_def(model_type) or {}
     path = model_def.get("path", "")
-    if not path:
+    if not path or not os.path.isfile(path):
+        # Scanned models have a synthetic path that is only materialised on save.
         return {"model": {}}, ""
     with open(path, "r", encoding="utf-8") as reader:
         return json.load(reader), path
@@ -1420,7 +1456,9 @@ def _build_finetune_json(mode, source_model_type, raw_source, raw_existing, name
     model_section = copy.deepcopy(raw_output.get("model", {}))
     model_section.pop("finetunes_infos", None)
     model_section.pop("finetunes_params", None)
-    if mode != "editor" and not model_section.get("architecture"):
+    if not model_section.get("architecture"):
+        # Editor mode normally inherits architecture from the existing file, but a scanned
+        # (in-memory) model has no such file, so make sure every saved finetune is self-describing.
         model_section["architecture"] = raw_source.get("model", {}).get("architecture", source_model_type)
     if source_model_type != model_section.get("architecture"):
         model_section[FINETUNE_SOURCE_MODEL_KEY] = source_model_type

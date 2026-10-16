@@ -104,6 +104,9 @@ from shared.loras_migration import migrate_loras_layout
 from shared.lora_paths import resolve_lora_dir
 from shared.utils.wgp_config_migration import migrate_extension_defaults
 from shared.utils import files_locator as fl 
+from shared.utils import model_scan_config
+from shared.utils import model_scan_runtime
+from shared.utils import model_scan_provider
 from shared.gradio.strip_gallery import StripGallery, STRIP_GALLERY_CLASSES
 from shared.utils.gallery_sources import GALLERY_SOURCES, STRIP_SOURCES, VIDEO, MESH, gallery_source, source_index, source_for_path, gallery_state_defaults
 from shared.utils.self_refiner import normalize_self_refiner_plan, ensure_refiner_list, add_refiner_rule, remove_refiner_rule
@@ -2722,6 +2725,7 @@ if not Path(config_load_filename).is_file():
         "UI_theme": "default",
         "floating_generate_button": True,
         "checkpoints_paths": fl.default_checkpoints_paths,
+        model_scan_config.SCAN_PATHS_CONFIG_KEY: model_scan_config.default_scan_paths(),
         "loras_root": DEFAULT_LORA_ROOT,
         "save_queue_if_crash": 1,
         "queue_color_scheme": "pastel",
@@ -2755,6 +2759,7 @@ server_config.setdefault("clear_file_list", 5)
 server_config.setdefault("prompt_enhancer_quantization", "quanto_int8")
 notifications.apply_defaults(server_config)
 server_config.setdefault(PROMPT_ENHANCER_SPECULATIVE_DECODING_KEY, PROMPT_ENHANCER_SPECULATIVE_DECODING_DEFAULT)
+server_config[model_scan_config.SCAN_PATHS_CONFIG_KEY] = model_scan_config.scan_paths_from_server(server_config)
 server_config[LLM_CONFIG_KEY] = normalize_llm_config(server_config)
 server_config["multi_prompts_gen_type"] = prompt_parser.normalize_multi_prompts_mode(
     server_config.get("multi_prompts_gen_type", prompt_parser.DEFAULT_MULTI_PROMPTS_MODE),
@@ -2774,7 +2779,12 @@ deepy_voice.install_gradio_routes(get_service=lambda: _deepy_hybrid, language=ar
 
 checkpoints_paths = server_config.get("checkpoints_paths", None)
 if checkpoints_paths is None: checkpoints_paths = server_config["checkpoints_paths"] = fl.default_checkpoints_paths
-fl.set_checkpoints_paths(checkpoints_paths)
+fl.set_checkpoints_paths(model_scan_config.checkpoint_lookup_roots(server_config, base_paths=checkpoints_paths))
+try:
+    model_scan_runtime.configure(server_config, cache_path=model_scan_runtime.default_cache_path(os.path.dirname(os.path.abspath(server_config_filename))))
+    model_scan_runtime.install_locator_resolver()
+except Exception as scan_error:
+    print(f"Model scan feature disabled: {scan_error}")
 three_levels_hierarchy = server_config.get("model_hierarchy_type", 1) == 1
 
 if app is None:
@@ -2903,7 +2913,7 @@ def get_base_model_type(model_type):
         return model_type if model_type in model_types_handlers else None 
         # return model_type
     else:
-        return model_def["architecture"]
+        return model_def.get("architecture", None)
 
 def get_parent_model_type(model_type):
     base_model_type =  get_base_model_type(model_type)
@@ -3376,6 +3386,52 @@ def init_model_def(model_type, model_def):
     return _store_model_metadata(model_type, default_model_def)
 
 
+def _initialise_scanned_model(model_id, model_def):
+    model_def = dict(model_def)
+    model_def["path"] = model_scan_provider.scanned_json_path(model_id)
+    model_def = init_model_def(model_id, model_def)
+    metadata = model_def.setdefault("metadata", {})
+    metadata["finetune"] = True
+    metadata[model_scan_provider.SCANNED_METADATA_KEY] = True
+    metadata["local_path"] = model_def.get(model_scan_provider.SCAN_PATH_KEY, "")
+    return model_def
+
+
+def _inject_scanned_models(models_def):
+    """Register locally scanned checkpoints as in-memory finetunes (never written to disk)."""
+    try:
+        # Always start from a clean slate: drop any entries injected by a previous
+        # refresh so dynamic models can never accumulate or duplicate.
+        model_scan_provider.strip_scanned_models(models_def)
+        if not model_scan_runtime.is_enabled():
+            return
+        index = model_scan_runtime.get_index(force=True, timeout=model_scan_runtime.DEFAULT_SCAN_TIMEOUT)
+        if not index:
+            return
+        model_infos = model_scan_provider.model_infos_from_models_def(models_def)
+        scanned_defs = model_scan_provider.build_scanned_model_defs(
+            index, model_infos, disk_model_types=set(models_def), initialiser=_initialise_scanned_model
+        )
+        models_def.update(scanned_defs)
+        _report_scan_status(index)
+    except Exception as scan_error:
+        print(f"Model scan: unable to register discovered models: {scan_error}")
+
+
+def _report_scan_status(index):
+    """Surface scan warnings/timeouts in the terminal log (degrade-safe)."""
+    stats = index.get("stats", {}) if isinstance(index, dict) else {}
+    if stats.get("timed_out"):
+        print("Model scan: the folder scan is taking longer than expected and is continuing in the background.")
+    warnings = stats.get("warnings") or []
+    if warnings:
+        print(f"Model scan: {len(warnings)} path(s) skipped during the scan:")
+        for warning in warnings[:10]:
+            print(f"  - {warning}")
+        if len(warnings) > 10:
+            print(f"  - ... and {len(warnings) - 10} more")
+
+
 def refresh_model_defs():
     global models_def, model_types, displayed_model_types
     new_models_def, parse_errors, previous_models_def, old_model_types = {}, [], models_def.copy(), set()
@@ -3438,6 +3494,8 @@ def refresh_model_defs():
                 warn(f"Finetune Definition File '{file_path}' will be ignored as there was an error in its refresh: {str(e)}")
 
     models_def = new_models_def
+    _inject_scanned_models(models_def)
+
     model_types = models_def.keys()
     displayed_model_types = [model_type for model_type, model_def in models_def.items() if model_def.get("visible", True)]
     return parse_errors
@@ -3610,7 +3668,15 @@ def save_model(model, model_type, dtype,  config_file,  submodel_no = 1,  is_mod
         print(f"No target filename with bf16 or fp16 in its name is mentioned in {url_key}")
         return
 
-    finetune_file = os.path.join(os.path.dirname(model_def["path"]) , model_type + ".json")
+    defined_path = model_def.get("path", None)
+    finetune_file = os.path.join(os.path.dirname(defined_path), model_type + ".json") if defined_path else ""
+    if not finetune_file or not os.path.isfile(finetune_file):
+        print(
+            f"Cannot save quantized files for '{model_type}': its definition file "
+            f"('{finetune_file}' - it may be a folder-scan model that has not been saved as a finetune yet) "
+            f"does not exist on disk."
+        )
+        return
     with open(finetune_file, 'r', encoding='utf-8') as reader:
         saved_finetune_def = json.load(reader)
 
@@ -3749,6 +3815,28 @@ def query_global_shared_model_files():
 
     return query_download_defs(server_config)
 
+def _try_scan_bind(model_filename, role=None):
+    """Reuse an already-present local weight found by the scan feature, if the guards allow.
+
+    Binding is opt-in (model_scan_bind_local) and only binds a unique, container- and
+    signature-compatible local file, so a wrong file never silently replaces a download.
+    """
+    if not model_filename or not isinstance(model_filename, str):
+        return None
+    try:
+        if not model_scan_runtime.is_bind_enabled():
+            return None
+        result = model_scan_runtime.attempt_bind(model_filename, role=role)
+        if result.path:
+            print(f"Reusing local file for '{os.path.basename(model_filename)}': {result.path}")
+            return result.path
+        if result.reason not in ("disabled", "no_index", "no_match"):
+            print(f"Local file not reused for '{os.path.basename(model_filename)}' ({result.reason}); candidates: {list(result.candidates)}")
+    except Exception as scan_error:
+        print(f"Local scan bind failed for '{model_filename}': {scan_error}")
+    return None
+
+
 def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None, model_def = None, gen=None, show_filename=True):
     def computeList(filename):
         if filename == None:
@@ -3769,6 +3857,8 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
 
     if not (any_source and file_type==0 or any_module_source and file_type==1):
         local_model_filename = fl.get_local_model_filename(model_filename, extra_paths= force_path)
+        if local_model_filename is None and len(model_filename) > 0:
+            local_model_filename = _try_scan_bind(model_filename, model_scan_runtime.ROLE_TEXT_ENCODER if file_type == 2 else model_scan_runtime.ROLE_CHECKPOINT)
         if local_model_filename is None and len(model_filename) > 0:
             local_model_filename = fl.get_smart_download_location(model_filename, force_path= force_path)
             url = model_filename
@@ -3793,6 +3883,8 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
 
         for url in preload_URLs:
             filename = fl.get_local_model_filename(url, lora_dir = lora_dir)
+            if filename is None:
+                filename = _try_scan_bind(url, model_scan_runtime.ROLE_VAE if prop == "VAE_URLs" else None)
             if filename is None: 
                 filename = fl.get_download_location(url, lora_dir = lora_dir)
                 if not url.startswith("http"):

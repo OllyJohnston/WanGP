@@ -7,10 +7,9 @@ import json
 from pathlib import Path
 
 import gradio as gr
-import gradio.component_meta as gradio_component_meta
-from gradio.components.base import server
 
 from shared.utils import files_locator as fl
+from shared.utils import local_browse
 
 
 VIDEO_FILE_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpeg", ".mpg", ".ogv"}
@@ -27,7 +26,7 @@ def configure_last_directory_store(server_config: dict | None) -> None:
 
 
 def _normalize_extensions(file_extensions: set[str] | list[str] | tuple[str, ...] | None) -> set[str]:
-    return {f".{str(ext).strip().lower().lstrip('.')}" for ext in (file_extensions or []) if str(ext).strip()}
+    return local_browse.normalize_extensions(file_extensions)
 
 
 def _available_roots() -> list[tuple[str, str]]:
@@ -65,90 +64,13 @@ def _is_non_local_entry(value: str) -> bool:
     return _is_probable_url(value) or str(value).startswith("=")
 
 
-_create_or_modify_pyi = gradio_component_meta.create_or_modify_pyi
-gradio_component_meta.create_or_modify_pyi = lambda *args, **kwargs: None
-
-
-class _FilteredFileExplorer(gr.FileExplorer):
-    def __init__(
-        self,
-        glob: str = "**/*",
-        *,
-        value=None,
-        file_count: str = "multiple",
-        root_dir: str | Path = ".",
-        ignore_glob: str | None = None,
-        label: str | None = None,
-        every=None,
-        inputs=None,
-        show_label: bool | None = None,
-        container: bool = True,
-        scale: int | None = None,
-        min_width: int = 160,
-        height: int | str | None = None,
-        max_height: int | str | None = 500,
-        min_height: int | str | None = None,
-        interactive: bool | None = None,
-        visible: bool = True,
-        elem_id: str | None = None,
-        elem_classes: list[str] | str | None = None,
-        render: bool = True,
-        key: int | str | None = None,
-        file_extensions: set[str] | list[str] | tuple[str, ...] | None = None,
-    ) -> None:
-        self.file_extensions = _normalize_extensions(file_extensions)
-        super().__init__(glob=glob, value=value, file_count=file_count, root_dir=root_dir, ignore_glob=ignore_glob, label=label, every=every, inputs=inputs, show_label=show_label, container=container, scale=scale, min_width=min_width, height=height, max_height=max_height, min_height=min_height, interactive=interactive, visible=visible, elem_id=elem_id, elem_classes=elem_classes, render=render, key=key)
-
-    @classmethod
-    def get_component_class_id(cls) -> str:
-        return gr.FileExplorer.get_component_class_id()
-
-    def get_block_name(self) -> str:
-        return "fileexplorer"
-
-    def get_block_class(self) -> str:
-        return "fileexplorer"
-
-    def get_config(self):
-        config = super().get_config()
-        config.pop("file_extensions", None)
-        return config
-
-    def _strip_root(self, path: str) -> str:
-        root_dir = os.path.abspath(os.path.normpath(self.root_dir))
-        normalized_path = os.path.abspath(os.path.normpath(path))
-        try:
-            relative_path = os.path.relpath(normalized_path, root_dir)
-        except ValueError:
-            return normalized_path
-        if relative_path == "." or relative_path.startswith(f"..{os.path.sep}") or relative_path == "..":
-            return normalized_path
-        return relative_path
-
-    @server
-    def ls(self, subdirectory=None):
-        if subdirectory is None:
-            subdirectory = []
-        try:
-            full_subdir_path = self._safe_join(subdirectory)
-            subdir_items = sorted(os.listdir(full_subdir_path), key=str.casefold)
-        except OSError:
-            return []
-        files, folders = [], []
-        for item in subdir_items:
-            full_path = os.path.join(full_subdir_path, item)
-            if os.path.isfile(full_path):
-                if not self.file_extensions or Path(full_path).suffix.lower() in self.file_extensions:
-                    files.append({"name": item, "type": "file", "valid": True})
-            else:
-                folders.append({"name": item, "type": "folder", "valid": False})
-        return folders + files
-
-
-gradio_component_meta.create_or_modify_pyi = _create_or_modify_pyi
-
-
 class LocalFilePickerTextbox:
+    """Text field with a folder-first browser.
+
+    The popup navigates folders only; selecting a folder fills the in-field list
+    with that folder's matching files, which the user highlights to set the value.
+    """
+
     def __init__(
         self,
         *,
@@ -188,21 +110,32 @@ class LocalFilePickerTextbox:
         paths = self._parse_text(value, self.static_compress_root)
         self.default_dir = self._start_dir_for_paths(paths) or self.static_default_dir or self._remembered_dir() or self.roots[0][1]
         self.default_root = self._root_for_paths(paths) or self._root_for_directory(self.default_dir) or self.roots[0][1]
+        # The folder currently shown in the in-field file list (starts at the value's folder).
+        self.field_dir = self._start_dir_for_paths(paths)
+        self._initial_selection = self._selected_paths_in_dir(paths, self.field_dir)
         self.textbox: gr.Textbox | None = None
         self.browse_button: gr.Button | None = None
+        self.file_list: gr.Radio | gr.CheckboxGroup | None = None
         self.popup: gr.Column | None = None
         self.drive: gr.Dropdown | None = None
         self.current_dir: gr.Textbox | None = None
         self.up_button: gr.Button | None = None
         self.close_button: gr.Button | None = None
-        self.exit_button: gr.Button | None = None
-        self.browser: gr.FileExplorer | None = None
+        self.select_folder_button: gr.Button | None = None
+        self.folder_list: gr.Radio | None = None
 
     def mount(self) -> gr.Textbox:
         gr.HTML(f"<style>{self.get_css()}{self._tooltip_css()}</style>", elem_classes=["wangp-local-file-picker-style"])
         with gr.Column(elem_classes=["wangp-local-file-picker-field", self.tooltip_class]):
             self.textbox = gr.Textbox(label=self.label, value=self.value, lines=self.lines, scale=self.textbox_scale)
             self.browse_button = gr.Button(self.browse_label, min_width=1, elem_classes=["wangp-local-file-picker-browse-btn"])
+            file_list_cls = gr.CheckboxGroup if self.multiselect else gr.Radio
+            self.file_list = file_list_cls(
+                choices=self._initial_file_choices(),
+                value=self._initial_selection if self.multiselect else (self._initial_selection[0] if self._initial_selection else None),
+                show_label=False,
+                elem_classes=["wangp-local-file-picker-file-list"],
+            )
         self._mount_popup()
         self._wire_events()
         return self.textbox
@@ -225,28 +158,36 @@ class LocalFilePickerTextbox:
                         self.drive = gr.Dropdown(self.roots, value=self.default_root, show_label=False, container=False, scale=1, min_width=90, elem_classes=["wangp-local-file-picker-drive"])
                         self.current_dir = gr.Text(show_label=False, value=self._display_dir(self.default_root, self.default_dir), placeholder="Folder", interactive=True, container=False, scale=8, min_width=240, elem_classes=["wangp-local-file-picker-folder-input"])
                         self.up_button = gr.Button("Up", min_width=58, elem_classes=["wangp-local-file-picker-up-btn"])
-                    self.browser = _FilteredFileExplorer(value=self._browser_value(self.default_dir, self._parse_text(self.value, self.static_compress_root)), file_extensions=self.file_extensions, glob="**/*.*", show_label=False, root_dir=self.default_dir, file_count="multiple" if self.multiselect else "single", height=self.browser_height, interactive=True)
-                    self.exit_button = gr.Button("Exit", visible=self.multiselect, elem_classes=["wangp-local-file-picker-exit-btn"], min_width=72)
+                    gr.HTML("<div class='wangp-local-file-picker-hint'>Open a folder below, then click <b>Select Folder</b> to list its files.</div>", padding=False, container=False)
+                    self.folder_list = gr.Radio(
+                        choices=[(name, path) for name, path in local_browse.list_subfolders(self.default_dir)],
+                        value=None,
+                        show_label=False,
+                        elem_classes=["wangp-local-file-picker-folder-list"],
+                    )
+                    self.select_folder_button = gr.Button("Select Folder", elem_classes=["wangp-local-file-picker-select-btn"], min_width=120)
 
     def _wire_events(self) -> None:
         assert self.textbox is not None
         assert self.browse_button is not None
+        assert self.file_list is not None
         assert self.popup is not None
         assert self.drive is not None
         assert self.current_dir is not None
         assert self.up_button is not None
         assert self.close_button is not None
-        assert self.exit_button is not None
-        assert self.browser is not None
+        assert self.select_folder_button is not None
+        assert self.folder_list is not None
 
-        self.browse_button.click(fn=self._open_popup, inputs=self._event_inputs([self.textbox], default_dir=True, compress_root=True), outputs=[self.popup, self.drive, self.current_dir, self.browser], queue=False, show_progress="hidden")
-        self.drive.change(fn=self._change_drive, inputs=self._event_inputs([self.drive, self.textbox], compress_root=True), outputs=[self.current_dir, self.browser], queue=False, show_progress="hidden")
-        self.current_dir.blur(fn=self._change_folder, inputs=self._event_inputs([self.drive, self.current_dir, self.textbox], compress_root=True), outputs=[self.drive, self.current_dir, self.browser], queue=False, show_progress="hidden")
-        self.current_dir.submit(fn=self._change_folder, inputs=self._event_inputs([self.drive, self.current_dir, self.textbox], compress_root=True), outputs=[self.drive, self.current_dir, self.browser], queue=False, show_progress="hidden")
-        self.up_button.click(fn=self._go_up, inputs=self._event_inputs([self.drive, self.current_dir, self.textbox], compress_root=True), outputs=[self.drive, self.current_dir, self.browser], queue=False, show_progress="hidden")
+        self.browse_button.click(fn=self._open_popup, inputs=self._event_inputs([self.textbox], default_dir=True, compress_root=True), outputs=[self.popup, self.drive, self.current_dir, self.folder_list], queue=False, show_progress="hidden")
+        self.drive.change(fn=self._change_drive, inputs=self._event_inputs([self.drive, self.textbox], compress_root=True), outputs=[self.current_dir, self.folder_list], queue=False, show_progress="hidden")
+        self.current_dir.blur(fn=self._change_folder, inputs=self._event_inputs([self.drive, self.current_dir, self.textbox], compress_root=True), outputs=[self.drive, self.current_dir, self.folder_list], queue=False, show_progress="hidden")
+        self.current_dir.submit(fn=self._change_folder, inputs=self._event_inputs([self.drive, self.current_dir, self.textbox], compress_root=True), outputs=[self.drive, self.current_dir, self.folder_list], queue=False, show_progress="hidden")
+        self.up_button.click(fn=self._go_up, inputs=self._event_inputs([self.drive, self.current_dir, self.textbox], compress_root=True), outputs=[self.drive, self.current_dir, self.folder_list], queue=False, show_progress="hidden")
+        self.folder_list.change(fn=self._navigate_into, inputs=self._event_inputs([self.folder_list, self.drive]), outputs=[self.drive, self.current_dir, self.folder_list], queue=False, show_progress="hidden")
+        self.select_folder_button.click(fn=self._select_folder, inputs=self._event_inputs([self.drive, self.current_dir, self.textbox], compress_root=True), outputs=[self.popup, self.file_list], queue=False, show_progress="hidden")
         self.close_button.click(fn=lambda: gr.update(visible=False), outputs=[self.popup], queue=False, show_progress="hidden")
-        self.exit_button.click(fn=lambda: gr.update(visible=False), outputs=[self.popup], queue=False, show_progress="hidden")
-        self.browser.change(fn=self._select_files, inputs=self._event_inputs([self.browser, self.textbox, self.drive, self.current_dir], compress_root=True), outputs=[self.textbox, self.popup], queue=False, show_progress="hidden")
+        self.file_list.change(fn=self._select_from_list, inputs=self._event_inputs([self.file_list, self.textbox], compress_root=True), outputs=[self.textbox], queue=False, show_progress="hidden")
 
     def _event_inputs(self, inputs: list, *, default_dir: bool = False, compress_root: bool = False) -> list:
         result = list(inputs)
@@ -256,31 +197,30 @@ class LocalFilePickerTextbox:
             result.append(self.compress_root_input)
         return result
 
+    # ------------------------------------------------------------------ popup
+
     def _open_popup(self, current_text: str, dynamic_default_dir=None, compress_root=None):
         compress_root = self._active_compress_root(compress_root)
         paths = self._parse_text(current_text, compress_root)
         current_dir = self._start_dir_for_paths(paths) or self._resolve_existing_dir(dynamic_default_dir) or self._remembered_dir() or self.default_dir
         selected_root = self._root_for_directory(current_dir) or self.default_root
         self._remember_dir(current_dir)
-        return gr.update(visible=True), gr.update(value=selected_root), gr.update(value=self._display_dir(selected_root, current_dir)), self._browser_update(current_dir, paths)
+        return gr.update(visible=True), gr.update(value=selected_root), gr.update(value=self._display_dir(selected_root, current_dir)), self._folders_update(current_dir)
 
     def _change_drive(self, selected_root: str, current_text: str, compress_root=None):
-        compress_root = self._active_compress_root(compress_root)
         current_dir = str(selected_root or self.default_root)
         self._remember_dir(current_dir)
-        return gr.update(value=""), self._browser_update(current_dir, self._parse_text(current_text, compress_root))
+        return gr.update(value=""), self._folders_update(current_dir)
 
     def _change_folder(self, selected_root: str, displayed_dir: str, current_text: str, compress_root=None):
-        compress_root = self._active_compress_root(compress_root)
         current_dir = self._resolve_dir_for_root(selected_root, displayed_dir)
         if not os.path.isdir(current_dir):
             return gr.skip(), gr.skip(), gr.skip()
         selected_root = self._root_for_directory(current_dir) or selected_root or self.default_root
         self._remember_dir(current_dir)
-        return gr.update(value=selected_root), gr.update(value=self._display_dir(selected_root, current_dir)), self._browser_update(current_dir, self._parse_text(current_text, compress_root))
+        return gr.update(value=selected_root), gr.update(value=self._display_dir(selected_root, current_dir)), self._folders_update(current_dir)
 
     def _go_up(self, selected_root: str, displayed_dir: str, current_text: str, compress_root=None):
-        compress_root = self._active_compress_root(compress_root)
         current_dir = self._resolve_dir_for_root(selected_root, displayed_dir)
         current_root = self._root_for_directory(current_dir)
         if current_root and os.path.abspath(os.path.normpath(current_root)).casefold() == current_dir.casefold():
@@ -289,31 +229,57 @@ class LocalFilePickerTextbox:
             parent_dir = os.path.dirname(current_dir) or current_root or current_dir
         selected_root = self._root_for_directory(parent_dir) or self.default_root
         self._remember_dir(parent_dir)
-        return gr.update(value=selected_root), gr.update(value=self._display_dir(selected_root, parent_dir)), self._browser_update(parent_dir, self._parse_text(current_text, compress_root))
+        return gr.update(value=selected_root), gr.update(value=self._display_dir(selected_root, parent_dir)), self._folders_update(parent_dir)
 
-    def _select_files(self, selected_paths, current_text: str, selected_root: str, displayed_dir: str, compress_root=None):
+    def _navigate_into(self, selected_folder: str | None, selected_root: str | None):
+        folder = str(selected_folder or "").strip()
+        if not folder or not os.path.isdir(folder):
+            return gr.skip(), gr.skip(), gr.skip()
+        selected_root = self._root_for_directory(folder) or selected_root or self.default_root
+        self._remember_dir(folder)
+        return gr.update(value=selected_root), gr.update(value=self._display_dir(selected_root, folder)), self._folders_update(folder)
+
+    def _select_folder(self, selected_root: str, displayed_dir: str, current_text: str, compress_root=None):
         compress_root = self._active_compress_root(compress_root)
         current_dir = self._resolve_dir_for_root(selected_root, displayed_dir)
-        selected = self._coerce_selected_paths(selected_paths)
-        if self.multiselect:
-            current_paths = self._current_entries_outside_dir(current_text, current_dir, compress_root)
-            current_paths.extend(selected)
-            return self._format_paths(current_paths, compress_root), gr.update()
-        selected_text = self._format_paths(selected, compress_root)
-        if not selected_text:
-            return gr.skip(), gr.update(visible=True)
-        current_text = self._format_paths(self._parse_text(current_text, compress_root), compress_root)
-        return selected_text, gr.update(visible=selected_text == current_text and bool(selected_text))
-
-    def _browser_update(self, current_dir: str, paths: list[str]):
+        if not os.path.isdir(current_dir):
+            return gr.skip(), gr.skip()
         self._remember_dir(current_dir)
-        return gr.update(root_dir=current_dir, value=self._browser_value(current_dir, paths))
+        self.field_dir = current_dir
+        paths = self._parse_text(current_text, compress_root)
+        return gr.update(visible=False), self._file_list_update(current_dir, paths)
 
-    def _browser_value(self, root: str, paths: list[str]):
-        root_paths = [path for path in paths if _is_under_root(path, root)]
+    # ------------------------------------------------------------------ field list
+
+    def _select_from_list(self, selected, current_text: str, compress_root=None):
+        compress_root = self._active_compress_root(compress_root)
+        selected_paths = self._coerce_selected_paths(selected)
         if self.multiselect:
-            return root_paths
-        return root_paths[0] if root_paths else []
+            paths = self._current_entries_outside_dir(current_text, self.field_dir, compress_root)
+            paths.extend(selected_paths)
+            return self._format_paths(paths, compress_root)
+        return self._format_paths(selected_paths, compress_root)
+
+    # ------------------------------------------------------------------ helpers
+
+    def _initial_file_choices(self) -> list[tuple[str, str]]:
+        if not self.field_dir:
+            return []
+        return [(name, path) for name, path in local_browse.list_files(self.field_dir, self.file_extensions)]
+
+    def _selected_paths_in_dir(self, paths: list[str], directory: str | None) -> list[str]:
+        if not directory:
+            return []
+        return [path for path in paths if _is_under_root(path, directory)]
+
+    def _file_list_update(self, directory: str, selected_paths: list[str]):
+        choices = [(name, path) for name, path in local_browse.list_files(directory, self.file_extensions)]
+        matches = self._selected_paths_in_dir(selected_paths, directory)
+        value = matches if self.multiselect else (matches[0] if matches else None)
+        return gr.update(choices=choices, value=value)
+
+    def _folders_update(self, directory: str):
+        return gr.update(choices=[(name, path) for name, path in local_browse.list_subfolders(directory)], value=None)
 
     def _root_for_paths(self, paths: list[str]) -> str | None:
         for path in paths:
@@ -402,7 +368,7 @@ class LocalFilePickerTextbox:
             return os.path.relpath(path, compress_root).replace("\\", "/")
         return fl.compress_path(path)
 
-    def _current_entries_outside_dir(self, current_text: str, current_dir: str, compress_root: str | None = None) -> list[str]:
+    def _current_entries_outside_dir(self, current_text: str, current_dir: str | None, compress_root: str | None = None) -> list[str]:
         compress_root = self._active_compress_root(compress_root)
         entries = []
         seen = set()
@@ -418,7 +384,7 @@ class LocalFilePickerTextbox:
                 else:
                     path = fl.uncompress_path(entry)
                 path = os.path.abspath(os.path.normpath(path))
-                if _is_under_root(path, current_dir):
+                if current_dir and _is_under_root(path, current_dir):
                     continue
                 normalized = path
             key = normalized.casefold()
@@ -539,6 +505,16 @@ class LocalFilePickerTextbox:
     visibility: visible;
     transition-delay: 0.5s;
 }
+.wangp-local-file-picker-file-list {
+    margin-top: 6px !important;
+}
+.wangp-local-file-picker-file-list .wrap,
+.wangp-local-file-picker-file-list > .form,
+.wangp-local-file-picker-file-list [data-testid="checkbox-group"],
+.wangp-local-file-picker-file-list fieldset {
+    max-height: 220px !important;
+    overflow-y: auto !important;
+}
 .wangp-local-file-picker-popup {
     position: fixed !important;
     top: 96px !important;
@@ -594,9 +570,6 @@ class LocalFilePickerTextbox:
     overflow: hidden !important;
     padding-bottom: 14px !important;
 }
-.wangp-local-file-picker-content .file-wrap {
-    max-height: none !important;
-}
 .wangp-local-file-picker-location-row {
     align-items: flex-end !important;
     gap: 8px !important;
@@ -626,15 +599,21 @@ class LocalFilePickerTextbox:
     height: 32px !important;
     padding: 4px 8px !important;
 }
-.wangp-local-file-picker-content .file-wrap,
-.wangp-local-file-picker-content .file-explorer,
-.wangp-local-file-picker-content [data-testid="file-explorer"] {
+.wangp-local-file-picker-hint {
+    margin: 6px 0 2px !important;
+    font-size: 12px !important;
+    opacity: 0.75 !important;
+}
+.wangp-local-file-picker-folder-list .wrap,
+.wangp-local-file-picker-folder-list > .form,
+.wangp-local-file-picker-folder-list [data-testid="radio"],
+.wangp-local-file-picker-folder-list fieldset {
+    max-height: 320px !important;
     overflow-y: auto !important;
 }
-.wangp-local-file-picker-exit-btn {
+.wangp-local-file-picker-select-btn {
     align-self: flex-end !important;
-    margin-top: 8px !important;
-    width: 72px !important;
-    min-width: 72px !important;
+    margin-top: 10px !important;
+    min-width: 120px !important;
 }
 """
