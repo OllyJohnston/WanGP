@@ -18,6 +18,7 @@ from shared.gradio import assistant_chat, gradio_queue_focus_patch, ui_studio
 from shared.gradio.hierarchy_selector import HierarchySelector
 from shared import notifications
 from shared.utils import prompt_parser
+from shared.utils import model_scan_config
 from shared.gradio.model_selector_toolbar import unload_models_from_ram
 from shared.utils.video_codecs import RGBA_VIDEO_OUTPUT_CHOICES, SDR_VIDEO_CODEC_CHOICES, VIDEO_CONTAINER_CHOICES, validate_video_output_settings
 from shared.deepy.config import (
@@ -324,6 +325,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
                             label="3K/4K+ Resolutions are available for all models"
                         )
                     default_paths = self.fl.default_checkpoints_paths
+                    scan_paths_block = model_scan_config.scan_paths_from_server(self.server_config)
                     checkpoints_paths_text = "\n".join(self.server_config.get("checkpoints_paths", default_paths))
                     self.checkpoints_paths_choice = gr.Textbox(
                         label="Model Checkpoint Folders (One Path per Line. First is Default Download Path)",
@@ -336,6 +338,28 @@ class ConfigTabPlugin(WAN2GPPlugin):
                         value=self.server_config.get("loras_root", "loras"),
                         interactive=not self.args.lock_config
                     )
+                    with gr.Group():
+                        self.scan_path_choices = [
+                            gr.Textbox(
+                                label=label,
+                                info="Reused read-only when a matching checkpoint is needed, so it is not downloaded again.",
+                                value=model_scan_config.scan_paths_to_text(scan_paths_block, category),
+                                lines=2,
+                                interactive=not self.args.lock_config,
+                            )
+                            for category, label in (
+                                ("checkpoints", "Extra Diffusion Checkpoint Folders (One Path per Line)"),
+                                ("text_encoders", "Extra Text Encoder Folders (One Path per Line)"),
+                                ("vae", "Extra VAE Folders (One Path per Line)"),
+                                ("loras", "Extra LoRA Folders (One Path per Line)"),
+                            )
+                        ]
+                        self.scan_bind_local_choice = gr.Checkbox(
+                            label="Reuse matching scanned files instead of downloading them",
+                            info="Only binds when a single compatible local file matches; every bind is logged.",
+                            value=model_scan_config.bind_local_from_server(self.server_config),
+                            interactive=not self.args.lock_config,
+                        )
                     self.save_queue_if_crash_choice = gr.Dropdown(
                         choices=[("Disabled", 0), ("Overwrite Last Error Queue", 1), ("Create a New Error Queue File", 2)],
                         value=self.server_config.get("save_queue_if_crash", 1),
@@ -918,7 +942,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
             self.state,
             self.transformer_types_choices, self.model_hierarchy_type_choice, self.fit_canvas_choice,
             self.attention_choice, self.generation_preview_choice, self.preload_model_policy_choice, self.clear_file_list_choice, self.multi_prompts_gen_type_choice, self.keep_intermediate_sliding_windows_choice,
-            self.display_stats_choice, self.max_frames_multiplier_choice, self.keep_resolution_on_model_switch_choice, self.enable_4k_resolutions_choice, self.checkpoints_paths_choice, self.loras_root_choice, self.save_queue_if_crash_choice,
+            self.display_stats_choice, self.max_frames_multiplier_choice, self.keep_resolution_on_model_switch_choice, self.enable_4k_resolutions_choice, self.checkpoints_paths_choice, self.loras_root_choice, *self.scan_path_choices, self.scan_bind_local_choice, self.save_queue_if_crash_choice,
             self.UI_theme_choice, self.floating_generate_button_choice, self.queue_color_scheme_choice, self.process_queues_when_browser_unfocused_choice, self.prevent_power_throttling_choice, self.compute_cache_choice, self.compute_cache_path_choice,
             self.quantization_choice, self.transformer_dtype_policy_choice, self.mixed_precision_choice,
             self.text_encoder_quantization_choice, self.lm_decoder_engine_choice, self.compile_choice,
@@ -1015,7 +1039,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
         (
             transformer_types_choices, model_hierarchy_type_choice, fit_canvas_choice,
             attention_choice, generation_preview_choice, preload_model_policy_choice, clear_file_list_choice, multi_prompts_gen_type_choice, keep_intermediate_sliding_windows_choice,
-            display_stats_choice, max_frames_multiplier_choice, keep_resolution_on_model_switch_choice, enable_4k_resolutions_choice, checkpoints_paths_choice, loras_root_choice, save_queue_if_crash_choice,
+            display_stats_choice, max_frames_multiplier_choice, keep_resolution_on_model_switch_choice, enable_4k_resolutions_choice, checkpoints_paths_choice, loras_root_choice, *scan_paths_values, scan_bind_local_value, save_queue_if_crash_choice,
             UI_theme_choice, floating_generate_button_choice, queue_color_scheme_choice, process_queues_when_browser_unfocused_choice, prevent_power_throttling_choice, compute_cache_choice, compute_cache_path_choice,
             quantization_choice, transformer_dtype_policy_choice, mixed_precision_choice,
             text_encoder_quantization_choice, lm_decoder_engine_choice, compile_choice,
@@ -1110,6 +1134,9 @@ class ConfigTabPlugin(WAN2GPPlugin):
         else:
             checkpoints_paths = [path.strip() for path in checkpoints_paths_choice.replace("\r", "").split("\n") if len(path.strip()) > 0]
 
+        scan_paths = model_scan_config.normalize_scan_paths(dict(zip(model_scan_config.SCAN_CATEGORIES, scan_paths_values)))
+        scan_bind_local = model_scan_config.normalize_bind_local(scan_bind_local_value)
+
         video_output_error = validate_video_output_settings(video_output_codec_choice, video_container_choice, audio_output_codec_choice)
         if rgba_video_output_choice not in {value for _, value in RGBA_VIDEO_OUTPUT_CHOICES}:
             video_output_error = "Choose RGBA PNG Frames (ZIP) or ProRes 4444 (MOV) for RGBA Video Output."
@@ -1124,7 +1151,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
                 gr.Info(f"Configuration was not saved: the Compute Cache folder cannot be created ({exc})")
                 return f"<div style='color:red; text-align:center;'>Configuration was not saved: the Compute Cache folder cannot be created ({html.escape(str(exc))})</div>", *[gr.update()]*9
 
-        self.fl.set_checkpoints_paths(checkpoints_paths)
+        self.fl.set_checkpoints_paths(model_scan_config.merged_checkpoint_paths(checkpoints_paths, scan_paths))
 
         audio_processor_config_update = audio_processor_api.collect_config_update(self.audio_processor_config_bindings, audio_processor_config_values)
         for message in audio_processor_api.validate_config_update_messages(self.audio_processor_config_bindings, audio_processor_config_update):
@@ -1186,6 +1213,8 @@ class ConfigTabPlugin(WAN2GPPlugin):
             "audio_stand_alone_output_codec": audio_stand_alone_output_codec_choice,
             "model_hierarchy_type": model_hierarchy_type_choice,
             "checkpoints_paths": checkpoints_paths,
+            model_scan_config.SCAN_PATHS_CONFIG_KEY: scan_paths,
+            model_scan_config.BIND_LOCAL_CONFIG_KEY: scan_bind_local,
             "loras_root": loras_root_choice,
             "save_queue_if_crash": save_queue_if_crash_choice,
             "queue_color_scheme": queue_color_scheme_choice,
@@ -1260,6 +1289,16 @@ class ConfigTabPlugin(WAN2GPPlugin):
                 raise gr.Error(str(exc)) from exc
         removed = old_server_config.keys() - new_server_config.keys()
         update_config(self.server_config, self.server_config_filename, updates, remove=removed)
+        scan_status_html = ""
+        try:
+            from shared.utils import model_scan_runtime
+            model_scan_runtime.reload(self.server_config)
+            model_scan_runtime.install_locator_resolver()
+            if model_scan_runtime.is_enabled():
+                model_scan_runtime.warm(timeout=5.0)
+            scan_status_html = model_scan_runtime.status_html()
+        except Exception:
+            pass
         if VOICE_MODE_KEY in updates:
             self.state.value.service.publish("voice_config", {"mode": voice_mode(self.server_config)})
         if 'clear_file_list' in updates:
@@ -1360,6 +1399,8 @@ class ConfigTabPlugin(WAN2GPPlugin):
             msg = "<div style='color:green; text-align:center;'>The new configuration has been succesfully applied. Some of the Settings will be only effective when you will start another Generation</div>"
         else:
             msg = "<div style='color:green; text-align:center;'>The new configuration has been succesfully applied.</div>"
+        if scan_status_html:
+            msg = msg + scan_status_html
 
         deepy_visible = deepy_available(new_server_config)
         launcher_update = gr.update(value=assistant_chat.render_launcher_html() if deepy_visible else "", visible=deepy_visible)

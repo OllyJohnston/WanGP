@@ -9,6 +9,13 @@ default_checkpoints_paths = ["ckpts", "."]
 
 _checkpoints_paths = default_checkpoints_paths
 
+# Optional last-resort filename resolvers. Registered by the model scan runtime
+# so weight files discovered in external scan directories (including nested
+# subfolders, which the flat root search above cannot see) can be reused instead
+# of downloaded. Each resolver takes a filename and returns a path or None.
+# Empty by default, so behaviour is unchanged unless a resolver is registered.
+_filename_resolvers = []
+
 
 def _is_probable_url(value: str) -> bool:
     return "://" in str(value) or str(value).startswith(("mailto:", "urn:"))
@@ -123,6 +130,20 @@ def set_checkpoints_paths(checkpoints_paths):
     if len(checkpoints_paths) == 0:
         _checkpoints_paths = default_checkpoints_paths
 
+def register_filename_resolver(resolver):
+    """Register a callable ``resolver(file_name) -> path | None`` (last resort)."""
+    if resolver not in _filename_resolvers:
+        _filename_resolvers.append(resolver)
+
+def unregister_filename_resolver(resolver):
+    try:
+        _filename_resolvers.remove(resolver)
+    except ValueError:
+        pass
+
+def clear_filename_resolvers():
+    _filename_resolvers.clear()
+
 def _normalize_force_path(force_path):
     if force_path is not None and isinstance(force_path, list) and len(force_path):
         force_path = force_path[0]
@@ -222,6 +243,14 @@ def locate_file(file_name, create_path_if_none = False, error_if_none = True, ex
                 return path
             searched_locations.append(os.path.abspath(path))
     
+    for resolver in _filename_resolvers:
+        try:
+            resolved = resolver(file_name)
+        except Exception:
+            resolved = None
+        if resolved:
+            return resolved
+
     if create_path_if_none:
         return get_download_location(file_name)
     if error_if_none: raise Exception(f"Unable to locate file '{file_name}', tried {searched_locations}")
