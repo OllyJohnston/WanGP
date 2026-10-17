@@ -1,11 +1,55 @@
-# WanGP
+# WanGP Enhanced
+
+> **This is an unofficial community fork of [WanGP / Wan2GP](https://github.com/deepbeepmeep/Wan2GP), the project created and maintained by DeepBeepMeep.**
+>
+> It is **not affiliated with, endorsed by, or supported by DeepBeepMeep or the official WanGP project.** All credit for WanGP itself — every model, the low-VRAM engine, the interface, the plugins — belongs to DeepBeepMeep and the WanGP community. This fork tracks upstream and adds only the differences listed below. Find the official project at **[deepbeepmeep/Wan2GP](https://github.com/deepbeepmeep/Wan2GP)** or **[wangp.ai](https://wangp.ai/)**.
 
 -----
 <p align="center">
-<b>WanGP by DeepBeepMeep : The best Open Source Generative Models Accessible to the GPU Poor</b>
+<b>WanGP Enhanced — an unofficial fork of WanGP by DeepBeepMeep : The best Open Source Generative Models Accessible to the GPU Poor</b>
 </p>
 
-WanGP is a one-stop super app for the best open source generative models across video, image, audio, and text-to-speech.
+WanGP Enhanced is a community fork of WanGP, the one-stop super app for the best open source generative models across video, image, audio, and text-to-speech. Everything upstream offers is included unchanged; the feature list below describes what this fork adds on top.
+
+## 🔀 What's Different from Upstream WanGP?
+
+These changes are added on top of [deepbeepmeep/Wan2GP](https://github.com/deepbeepmeep/Wan2GP) (fork modifications introduced 16–17 October 2026). Everything not listed here is upstream WanGP and remains DeepBeepMeep's work.
+
+### 🗂️ Dynamic Model, Text-Encoder and VAE Folder Scanning
+
+Point WanGP at extra folders of models you already have on disk, and it indexes and offers them like any built-in model — instead of you hand-writing finetune JSON files.
+
+- **No manual finetune JSON.** Scanned diffusion checkpoints are registered as selectable models in the normal three-level model selector (family → base model → variant), so they behave like any other model in the UI.
+- **Architecture-aware classification.** Each `.safetensors` file is classified by reading its *header metadata* (with the filename as a fallback) to work out whether it is a UNet/DiT checkpoint, a text encoder (`clip_l`, `t5xxl`, `umt5`, `qwen-vl`, `qwen3`) or a VAE. Only the safetensors header is read — never the weight tensors — so indexing is fast and memory-light.
+- **Local-first, no surprise downloads.** When a model or text encoder you already own matches the asset WanGP is about to fetch, the fork binds your local file and skips the Hugging Face download. Binding only happens on an unambiguous single match (with format, category and optional size guards), and every bind is logged.
+- **Safe by design.** Pickle-based containers (`.ckpt`, `.pt`, `.pth`, `.bin`) are indexed by filename only and are **never opened or bound**. The scan is read-only and **opt-in** — it does nothing until you configure a folder.
+- **Configure once.** Set the folders in *Configuration*, in the model checkpoint folders section: **Extra Diffusion Checkpoint Folders**, **Extra Text Encoder Folders** and **Extra VAE Folders**, then tick **Reuse matching scanned files instead of downloading them**. Skipped or unreadable files are reported back in the configuration UI.
+
+### 🎛️ Model Selector Improvements
+
+- **A–Z family ordering:** the top-level model-family dropdown is sorted alphabetically by its display label.
+- **Inherited variant pools:** models that reuse another model's checkpoint (for example *krea2_turbo_edit*, which inherits *krea2_turbo*) now also list the owner's variants in the third-level picker, instead of showing an empty list.
+
+### 🧩 Restored Local File Browser
+
+The finetune / checkpoint / encoder picker has a working local filesystem browser again, so you can navigate to a file on disk rather than typing an absolute path by hand.
+
+### 🖼️ Z-Image (Qwen3 text encoder) Fix
+
+Tied-weights exports of the Qwen3 text encoder — where `lm_head.weight` is not stored as a separate tensor — now load correctly. The fork ties `lm_head` to the token embeddings for Hugging Face safetensors, matching what upstream already did for GGUF, and so avoids a hard *missing key* failure during model load.
+
+### 🧪 Engineering Notes
+
+- The new scanning logic is stdlib-only and covered by a fast unit and integration test suite (`python -m unittest discover -s shared/utils/tests`).
+- The dynamic scanning feature is fully opt-in and inert until you configure a scan folder, so it cannot affect a stock install.
+
+### 📄 Licensing and Attribution
+
+This fork is distributed under the same **WanGP Community License 2.0** as upstream (see [LICENSE.txt](LICENSE.txt)). It is a modified version of WanGP; the modifications are those described above, dated 16–17 October 2026. All upstream copyright, attribution and licence notices are preserved, and this fork claims no endorsement or affiliation with the WanGP project.
+
+---
+
+*The upstream sections below — Highlights, Latest Updates, Installation, Usage and so on — are unchanged from WanGP.*
 
 ## Highlights
 
@@ -51,10 +95,13 @@ WanGP is a one-stop super app for the best open source generative models across 
 > **WanGP is free to use locally.** The official project will never ask you to pay a license fee, subscription, or donation to run WanGP on your own computer (see the license for terms).
 >
 > **Use only the official GitHub repository or wangp.ai / wan2gp.ai websites. WanGP is not affiliated to any other third-party service using the WanGP/Wan2GP names**, unless explicitly stated here.
+>
+> **Note on this repository:** this is an **unofficial community fork** (see the notice at the top of this page). It applies a small number of modifications to WanGP and is not supported by DeepBeepMeep. The official, supported WanGP project is at **[deepbeepmeep/Wan2GP](https://github.com/deepbeepmeep/Wan2GP)**.
 
 
 ## 📋 Table of Contents
 
+- [🔀 What's Different from Upstream WanGP?](#-whats-different-from-upstream-wangp)
 - [🚀 Quick Start](#-quick-start)
 - [📦 Installation](#-installation)
 - [🎯 Usage](#-usage)
@@ -535,5 +582,7 @@ https://www.youtube.com/watch?v=T5jNiEhf9xk
 ---
 
 <p align="center">
-Made with ❤️ by DeepBeepMeep
+WanGP — made with ❤️ by DeepBeepMeep<br>
+WanGP Enhanced — an unofficial community fork maintained by <a href="https://github.com/OllyJohnston">OllyJohnston</a><br>
+<sub>Not affiliated with or endorsed by DeepBeepMeep or the official WanGP project.</sub>
 </p>
