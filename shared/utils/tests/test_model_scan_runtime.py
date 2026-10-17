@@ -183,6 +183,40 @@ class RuntimeTests(unittest.TestCase):
             rt.install_locator_resolver()
             self.assertIsNone(rt.files_locator.locate_file("A.safetensors", error_if_none=False))
 
+    def test_resolve_basename_refuses_non_weight_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Legacy pickles are indexed by name but must never bind: binding would
+            # route an untrusted local file into torch.load (arbitrary code execution).
+            with open(os.path.join(tmp, "legacy.ckpt"), "wb") as handle:
+                handle.write(b"\x80\x02not-a-real-pickle")
+            rt.configure(server_config(checkpoints=[tmp], bind=True))
+            self.assertIsNone(rt.resolve_basename("legacy.ckpt"))
+
+    def test_resolve_basename_size_mismatch_rejects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "A.safetensors")
+            write_safetensors(target, ["x"])
+            size = os.path.getsize(target)
+            rt.configure(server_config(checkpoints=[tmp], bind=True))
+            url = "https://huggingface.co/org/repo/resolve/main/A.safetensors"
+            rt._hf_repo_size_cache["org/repo"] = {"A.safetensors": size}
+            self.assertEqual(rt.resolve_basename(url), target)
+            rt._hf_repo_size_cache["org/repo"] = {"A.safetensors": size + 1}
+            self.assertIsNone(rt.resolve_basename(url))
+
+    def test_locator_resolver_sees_url_for_size_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "A.safetensors")
+            write_safetensors(target, ["x"])
+            size = os.path.getsize(target)
+            rt.configure(server_config(checkpoints=[tmp], bind=True))
+            rt.install_locator_resolver()
+            url = "https://huggingface.co/org/repo/resolve/main/A.safetensors"
+            rt._hf_repo_size_cache["org/repo"] = {"A.safetensors": size + 1}
+            self.assertIsNone(rt.files_locator.locate_file(url, error_if_none=False))
+            rt._hf_repo_size_cache["org/repo"] = {"A.safetensors": size}
+            self.assertEqual(rt.files_locator.locate_file(url, error_if_none=False), target)
+
     def test_scan_roots_excludes_loras(self):
         rt.configure(server_config(checkpoints=["D:/c"], text_encoders=["D:/t"]))
         self.assertEqual(rt.scan_roots(), {"checkpoints": ["D:/c"], "text_encoders": ["D:/t"]})

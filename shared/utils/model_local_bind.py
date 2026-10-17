@@ -21,7 +21,12 @@ from __future__ import annotations
 import os
 from typing import Callable, Iterable, Mapping, Optional
 
-# Container formats preferred when several candidates share a basename.
+# Container formats that may ever be bound. Pickle-based containers
+# (.ckpt/.pt/.pth/.bin) are refused outright: binding one would route an
+# untrusted local file into a later torch.load/pickle path (arbitrary code
+# execution). Only header-safe safetensors and GGUF are eligible.
+BINDABLE_EXTENSIONS = (".safetensors", ".sft", ".gguf")
+# Container formats preferred when several bindable candidates share a basename.
 PREFERRED_EXTENSIONS = (".safetensors", ".sft")
 
 REASON_BOUND = "bound"
@@ -31,6 +36,7 @@ REASON_AMBIGUOUS = "ambiguous"
 REASON_SIZE_MISMATCH = "size_mismatch"
 REASON_INCOMPATIBLE = "incompatible"
 REASON_DISABLED = "disabled"
+REASON_UNSAFE_FORMAT = "unsafe_format"
 
 
 class BindResult(dict):
@@ -127,6 +133,14 @@ def find_local_bind(
     candidates = list(basename_map.get(name, []))
     if not candidates:
         return BindResult(None, REASON_NO_MATCH)
+
+    # 0) Refuse unsafe/non-weight containers outright (pickle .ckpt/.pt/.pth/.bin).
+    #    Only header-safe safetensors/GGUF may ever be bound, so an untrusted local
+    #    pickle can never be routed into a torch.load path by a name collision.
+    bindable = [entry for entry in candidates if _extension_of(entry_path(entry)) in BINDABLE_EXTENSIONS]
+    if not bindable:
+        return BindResult(None, REASON_UNSAFE_FORMAT, _paths(candidates), expected_size)
+    candidates = bindable
 
     # 1) Prefer safetensors containers when any are present.
     preferred = [entry for entry in candidates if _extension_of(entry_path(entry)) in PREFERRED_EXTENSIONS]

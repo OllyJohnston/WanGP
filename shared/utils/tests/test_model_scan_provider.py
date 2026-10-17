@@ -59,6 +59,20 @@ class ProviderHelpersTests(unittest.TestCase):
         self.assertFalse(provider.is_scanned_model_def({"metadata": {}}))
         self.assertFalse(provider.is_scanned_model_def(None))
 
+    def test_claimed_scan_paths_ignores_remote_and_scanned_defs(self):
+        claimed = provider.claimed_scan_paths(
+            {
+                "cloud": {"URLs": ["https://h/x/y.safetensors"]},
+                "local": {"URLs": ["D:/models/foo.safetensors"]},
+                "scanned": {
+                    provider.SCAN_PATH_KEY: "D:/models/bar.safetensors",
+                    "URLs": ["D:/models/bar.safetensors"],
+                },
+            }
+        )
+        self.assertIn(os.path.normcase(os.path.abspath("D:/models/foo.safetensors")), claimed)
+        self.assertEqual(len(claimed), 1)
+
     def test_model_infos_from_models_def(self):
         infos = provider.model_infos_from_models_def(
             {"krea2_turbo": {"architecture": "krea2_turbo", "path": "defaults/krea2_turbo.json"}, "bad": "not-a-dict"}
@@ -99,6 +113,19 @@ class BuildScannedDefsTests(unittest.TestCase):
         defs = self._build(
             [_entry("D:/models/krea2SATDirtyrealism_v4_fp8.safetensors", "krea2")],
             disk={"scan_krea2SATDirtyrealism_v4_fp8"},
+        )
+        self.assertEqual(defs, {})
+
+    def test_promoted_rename_suppresses_scanned_entry(self):
+        # A scanned checkpoint renamed+promoted to a disk finetune points its URLs
+        # at the same local weight. The scan must not re-add the old entry.
+        entry = _entry("D:/models/krea2SATDirtyrealism_v4_fp8.safetensors", "krea2")
+        index = {"entries": {"0": entry}}
+        claimed = provider.claimed_scan_paths(
+            {"my_renamed_finetune": {"URLs": ["D:/models/krea2SATDirtyrealism_v4_fp8.safetensors"]}}
+        )
+        defs = provider.build_scanned_model_defs(
+            index, _model_infos(), {"my_renamed_finetune"}, claimed_paths=claimed
         )
         self.assertEqual(defs, {})
 

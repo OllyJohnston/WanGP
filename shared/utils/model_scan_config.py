@@ -18,8 +18,9 @@ The block is intentionally a small, self-describing schema::
 Categories ``checkpoints``, ``text_encoders`` and ``vae`` are appended to the
 checkpoint lookup roots (see :func:`checkpoint_lookup_roots`); the *first*
 configured checkpoint root keeps its role as the download destination. The
-``loras`` category is stored here for the LoRA resolver to consume and is not
-merged into the checkpoint roots.
+``loras`` category is reserved in the schema but is **not yet consumed** by the
+pipeline (native LoRA scanning is not wired up), so it is deliberately not
+surfaced in the configuration UI.
 
 This module must stay dependency-free (standard library only) so it can be
 imported and unit tested without the heavy ML runtime.

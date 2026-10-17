@@ -3391,20 +3391,19 @@ def _initialise_scanned_model(model_id, model_def):
 def _inject_scanned_models(models_def):
     """Register locally scanned checkpoints as in-memory finetunes (never written to disk)."""
     try:
-        # Always start from a clean slate: drop any entries injected by a previous
-        # refresh so dynamic models can never accumulate or duplicate.
-        model_scan_provider.strip_scanned_models(models_def)
         if not model_scan_runtime.is_enabled():
+            # Feature disabled: ensure any previously injected entries are gone.
+            model_scan_provider.strip_scanned_models(models_def)
             return
-        index = model_scan_runtime.get_index(force=True, timeout=model_scan_runtime.DEFAULT_SCAN_TIMEOUT)
-        if not index:
-            return
-        model_infos = model_scan_provider.model_infos_from_models_def(models_def)
-        scanned_defs = model_scan_provider.build_scanned_model_defs(
-            index, model_infos, disk_model_types=set(models_def), initialiser=_initialise_scanned_model
+        # Non-blocking: return the cached index if present, otherwise kick off a
+        # background scan and return whatever is available. Never joins the scan
+        # thread, so UI init / model switching / Refresh can no longer stall.
+        index = model_scan_runtime.get_index(force=False, wait=False)
+        model_scan_provider.inject_scanned_models(
+            models_def, index, initialiser=_initialise_scanned_model
         )
-        models_def.update(scanned_defs)
-        _report_scan_status(index)
+        if index:
+            _report_scan_status(index)
     except Exception as scan_error:
         print(f"Model scan: unable to register discovered models: {scan_error}")
 

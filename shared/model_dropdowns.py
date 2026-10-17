@@ -113,20 +113,6 @@ def decorate_finetune_dropdown_choices(deps, choices):
     return decorated
 
 
-_FALLBACK_FAMILY_INFO = (999, "Unknown")
-
-
-def family_info(deps, family):
-    """Family ordering/label, tolerating a model whose family is unknown.
-
-    ``get_model_family`` returns the sentinel ``"unknown"`` when a model has no
-    resolvable architecture (for example a malformed or hidden model def), and
-    that sentinel is not registered in ``families_infos``. Indexing it directly
-    would raise and blank the whole selector, so look it up defensively.
-    """
-    return deps.families_infos.get(family, _FALLBACK_FAMILY_INFO)
-
-
 def get_dropdown_model_types(deps):
     dropdown_types = list(deps.transformer_types) if len(deps.transformer_types) > 0 else list(deps.displayed_model_types)
     if deps.transformer_type not in dropdown_types:
@@ -548,23 +534,6 @@ def get_model_download_status_map(deps, dropdown_types=None):
     return get_model_download_status_maps(deps, dropdown_types)[1]
 
 
-def _alphabetise_children(entries, pin_default=True):
-    """Sort level-3 entries A-Z by display name.
-
-    The base model's own entry (``entries[0]``) is kept first when ``pin_default``
-    is set, so the base/finetune split stays intuitive while the finetunes
-    themselves are ordered alphabetically.
-    """
-    if len(entries) <= 1:
-        return list(entries)
-    if pin_default:
-        head, tail = entries[0], entries[1:]
-    else:
-        head, tail = None, entries
-    ordered = sorted(tail, key=lambda entry: entry[0].casefold())
-    return ([head] + ordered) if head is not None else ordered
-
-
 def create_models_hierarchy(rows):
     """
     rows: list of (model_name, model_id, parent_model_id)
@@ -686,16 +655,16 @@ def create_models_hierarchy(rows):
                 numbered.append((dname, mid))
 
         parents_list.append((header, pid))
-        children_dict[pid] = _alphabetise_children(numbered)
+        children_dict[pid] = numbered
 
     for pid in groups.keys():
         if pid in parents:
             continue
         first_name = groups[pid][0][0]
         parents_list.append((first_name, pid))
-        children_dict[pid] = _alphabetise_children([(name, mid) for name, mid in groups[pid]], pin_default=False)
+        children_dict[pid] = [(name, mid) for name, mid in groups[pid]]
 
-    parents_list = sorted(parents_list, key=lambda c: c[0].casefold())
+    parents_list = sorted(parents_list, key=lambda c: c[0])
     return parents_list, children_dict
 
 
@@ -708,7 +677,7 @@ def create_models_selector_hierarchy(deps, dropdown_types=None):
             family_model_types[family].append(model_type)
 
     tree = {"folders": [], "items": []}
-    sorted_families = sorted(family_model_types, key=lambda family: deps.families_infos[family][1].casefold())
+    sorted_families = sorted(family_model_types, key=lambda family: deps.families_infos[family][0])
     for family in sorted_families:
         family_name = deps.families_infos[family][1]
         rows = [
@@ -731,29 +700,24 @@ def create_models_selector_hierarchy(deps, dropdown_types=None):
 
 
 def get_sorted_dropdown(deps, dropdown_types, current_model_family, current_model_type, three_levels=True):
-    entries = [(model_type, deps.get_model_family(model_type, for_ui=True)) for model_type in dropdown_types]
-    known_entries = [entry for entry in entries if entry[1] in deps.families_infos]
-    if known_entries:
-        entries = known_entries
-    dropdown_types = [model_type for model_type, _ in entries]
-    models_families = [family for _, family in entries]
+    models_families = [deps.get_model_family(t, for_ui=True) for t in dropdown_types]
     families = {}
     for family in models_families:
         if family not in families:
             families[family] = 1
 
-    families_orders = [family_info(deps, family)[0] for family in families]
-    families_labels = [family_info(deps, family)[1] for family in families]
-    sorted_familes = [info[1:] for info in sorted(zip(families_orders, families_labels, families), key=lambda c: c[1].casefold())]
+    families_orders = [deps.families_infos[family][0] for family in families]
+    families_labels = [deps.families_infos[family][1] for family in families]
+    sorted_familes = [info[1:] for info in sorted(zip(families_orders, families_labels, families), key=lambda c: c[0])]
     if current_model_family is None:
-        dropdown_choices = [(family_info(deps, family)[0], deps.get_model_name(model_type), model_type) for model_type, family in zip(dropdown_types, models_families)]
+        dropdown_choices = [(deps.families_infos[family][0], deps.get_model_name(model_type), model_type) for model_type, family in zip(dropdown_types, models_families)]
     else:
-        dropdown_choices = [(family_info(deps, family)[0], compact_name(family_info(deps, family)[1], deps.get_model_name(model_type)), model_type) for model_type, family in zip(dropdown_types, models_families) if family == current_model_family]
-    dropdown_choices = sorted(dropdown_choices, key=lambda c: (c[1].casefold(), c[0]))
+        dropdown_choices = [(deps.families_infos[family][0], compact_name(deps.families_infos[family][1], deps.get_model_name(model_type)), model_type) for model_type, family in zip(dropdown_types, models_families) if family == current_model_family]
+    dropdown_choices = sorted(dropdown_choices, key=lambda c: (c[0], c[1]))
     if three_levels:
         dropdown_choices = [(*model[1:], deps.get_parent_model_type(model[2])) for model in dropdown_choices]
         sorted_choices, finetunes_dict = create_models_hierarchy(dropdown_choices)
-        return sorted_familes, sorted_choices, finetunes_dict.get(deps.get_parent_model_type(current_model_type), [])
+        return sorted_familes, sorted_choices, finetunes_dict[deps.get_parent_model_type(current_model_type)]
     dropdown_types_list = list({deps.get_base_model_type(model[2]) for model in dropdown_choices})
     dropdown_choices = [model[1:] for model in dropdown_choices]
     return sorted_familes, dropdown_types_list, dropdown_choices
@@ -784,7 +748,7 @@ def generate_dropdown_model_list(deps, current_model_type, state=None):
 
 def change_model_family(deps, state, current_model_family):
     dropdown_types = get_filtered_dropdown_model_types(deps, get_model_output_filter(deps, state))
-    current_family_name = family_info(deps, current_model_family)[1]
+    current_family_name = deps.families_infos[current_model_family][1]
     models_families = [deps.get_model_family(t, for_ui=True) for t in dropdown_types]
     dropdown_choices = [(compact_name(current_family_name, deps.get_model_name(model_type)), model_type) for model_type, family in zip(dropdown_types, models_families) if family == current_model_family]
     dropdown_choices = sorted(dropdown_choices, key=lambda c: c[0])
@@ -793,14 +757,14 @@ def change_model_family(deps, state, current_model_family):
     last_model_per_family = state.get("last_model_per_family", {})
     model_type = last_model_per_family.get(current_model_family, "")
     if len(model_type) == "" or model_type not in [choice[1] for choice in dropdown_choices]:
-        model_type = dropdown_choices[0][1] if dropdown_choices else ""
+        model_type = dropdown_choices[0][1]
 
     if deps.three_levels_hierarchy:
         parent_model_type = deps.get_parent_model_type(model_type)
         dropdown_choices = [(*tup, deps.get_parent_model_type(tup[1])) for tup in dropdown_choices]
         dropdown_base_types_choices, finetunes_dict = create_models_hierarchy(dropdown_choices)
-        parent_choices = decorate_finetune_dropdown_choices(deps, finetunes_dict.get(parent_model_type, []))
-        dropdown_choices = decorate_dropdown_choices_with_status(parent_choices, direct_status_map)
+        finetunes_dict[parent_model_type] = decorate_finetune_dropdown_choices(deps, finetunes_dict[parent_model_type])
+        dropdown_choices = decorate_dropdown_choices_with_status(finetunes_dict[parent_model_type], direct_status_map)
         dropdown_base_types_choices = decorate_dropdown_choices_with_status(dropdown_base_types_choices, aggregated_parent_status_map)
         model_finetunes_visible = len(dropdown_choices) > 1
     else:
@@ -816,17 +780,17 @@ def change_model_base_types(deps, state, current_model_family, model_base_type_c
     if not deps.three_levels_hierarchy:
         return gr.update()
     dropdown_types = get_filtered_dropdown_model_types(deps, get_model_output_filter(deps, state))
-    current_family_name = family_info(deps, current_model_family)[1]
+    current_family_name = deps.families_infos[current_model_family][1]
     dropdown_choices = [(compact_name(current_family_name, deps.get_model_name(model_type)), model_type, model_base_type_choice) for model_type in dropdown_types if deps.get_parent_model_type(model_type) == model_base_type_choice and deps.get_model_family(model_type, for_ui=True) == current_model_family]
     dropdown_choices = sorted(dropdown_choices, key=lambda c: c[0])
     _, finetunes_dict = create_models_hierarchy(dropdown_choices)
     base_dropdown_types = [choice[1] for choice in dropdown_choices]
     direct_status_map, _ = get_model_download_status_maps(deps, base_dropdown_types)
-    finetune_choices = decorate_finetune_dropdown_choices(deps, finetunes_dict.get(model_base_type_choice, []))
-    dropdown_choices = decorate_dropdown_choices_with_status(finetune_choices, direct_status_map)
+    finetunes_dict[model_base_type_choice] = decorate_finetune_dropdown_choices(deps, finetunes_dict[model_base_type_choice])
+    dropdown_choices = decorate_dropdown_choices_with_status(finetunes_dict[model_base_type_choice], direct_status_map)
     model_finetunes_visible = len(dropdown_choices) > 1
     last_model_per_type = state.get("last_model_per_type", {})
     model_type = last_model_per_type.get(model_base_type_choice, "")
     if len(model_type) == "" or model_type not in [choice[1] for choice in dropdown_choices]:
-        model_type = dropdown_choices[0][1] if dropdown_choices else ""
+        model_type = dropdown_choices[0][1]
     return gr.update(scale=3 if model_finetunes_visible else 6), gr.Dropdown(choices=dropdown_choices, value=model_type, visible=model_finetunes_visible)
