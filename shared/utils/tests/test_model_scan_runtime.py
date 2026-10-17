@@ -292,6 +292,50 @@ class BoundedScanTests(unittest.TestCase):
         self.assertNotIn("no scan folders configured", html)
 
 
+class StatusWarningHtmlTests(unittest.TestCase):
+    """The config UI status line must list skipped paths (escaped), not just a count."""
+
+    def setUp(self):
+        rt.reset()
+        rt.files_locator.clear_filename_resolvers()
+        self._tmp = tempfile.TemporaryDirectory()
+        rt.configure(server_config(checkpoints=[self._tmp.name], bind=True))
+
+    def tearDown(self):
+        rt.reset()
+        rt.files_locator.clear_filename_resolvers()
+        self._tmp.cleanup()
+
+    def test_warning_paths_are_rendered(self):
+        rt._state["warnings"] = ["PermissionError: D:\\blocked\\a.safetensors"]
+        html = rt.status_html()
+        self.assertIn("PermissionError: D:\\blocked\\a.safetensors", html)
+        self.assertIn("<li", html)
+
+    def test_warning_paths_are_html_escaped(self):
+        rt._state["warnings"] = ["loop: D:\\x<script>alert(1)</script>.safetensors"]
+        html = rt.status_html()
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
+
+    def test_warning_list_is_capped_with_overflow_marker(self):
+        overflow = rt.STATUS_WARNING_LIMIT + 15
+        rt._state["warnings"] = [f"loop: D:\\p{i}" for i in range(overflow)]
+        html = rt.status_html()
+        self.assertEqual(html.count("<li"), rt.STATUS_WARNING_LIMIT + 1)
+        self.assertIn(f"{overflow - rt.STATUS_WARNING_LIMIT} more", html)
+
+    def test_no_warning_list_when_clean(self):
+        rt.warm(timeout=5.0)
+        html = rt.status_html()
+        self.assertNotIn("<li", html)
+
+    def test_index_stats_warnings_are_included(self):
+        rt._state["index"] = {"version": 1, "entries": {}, "stats": {"files": 1, "warnings": ["max_depth: D:\\deep"]}}
+        html = rt.status_html()
+        self.assertIn("max_depth: D:\\deep", html)
+
+
 class CachePathTests(unittest.TestCase):
     def test_default_cache_path_uses_ignored_cache_subdir(self):
         path = rt.default_cache_path(os.path.join("D:" + os.sep, "WanGP"))
