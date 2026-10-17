@@ -45,6 +45,16 @@ def _build_qwen3_state_dict_preprocessor(config_path: str):
 
     def preprocess_state_dict(state_dict, quantization_map=None, tied_weights_map=None):
         if not _qwen3_gguf_mapping_needed(state_dict):
+            # Hugging Face safetensors export that omits ``lm_head.weight`` because it
+            # is tied to the token embeddings (a common Qwen3 text-encoder export).
+            # mmgp's loader treats every missing key as fatal, so re-create the tie
+            # here rather than failing with "Missing keys: ['lm_head.weight']".
+            if _HF_LM_HEAD_KEY not in state_dict and _HF_TOKEN_EMBEDDING_KEY in state_dict:
+                if tied_weights_map is None:
+                    tied_weights_map = {}
+                tied_names = tied_weights_map.setdefault(_HF_TOKEN_EMBEDDING_KEY, [])
+                if _HF_LM_HEAD_KEY not in tied_names:
+                    tied_names.append(_HF_LM_HEAD_KEY)
             return state_dict, quantization_map, tied_weights_map
 
         name_map, tie_word_embeddings = _qwen3_gguf_load_info(config_path)
