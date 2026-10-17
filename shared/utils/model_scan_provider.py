@@ -73,6 +73,38 @@ def is_scanned_model_def(model_def) -> bool:
     return bool(isinstance(metadata, dict) and metadata.get(SCANNED_METADATA_KEY))
 
 
+def _local_path_key(value) -> str:
+    """Normalise a local filesystem path for comparison (empty string for URLs/blank)."""
+    text = str(value or "").strip()
+    if not text or text.startswith("http") or text.startswith("="):
+        return ""
+    return os.path.normcase(os.path.abspath(text))
+
+
+def claimed_scan_paths(models_def) -> set:
+    """Local weight paths already owned by a disk (non-scanned) definition.
+
+    When a scanned checkpoint is promoted to a real finetune the editor writes a
+    JSON whose ``URLs`` point at the same local weight file. Even if the finetune
+    was renamed (so its id no longer matches the scanned id) the scan must stop
+    re-adding the old entry, otherwise the model appears twice.
+    """
+    claimed: set = set()
+    if not isinstance(models_def, Mapping):
+        return claimed
+    for model_def in models_def.values():
+        if not isinstance(model_def, Mapping) or is_scanned_model_def(model_def):
+            continue
+        urls = model_def.get("URLs") or []
+        if isinstance(urls, str):
+            urls = [urls]
+        for url in urls:
+            key = _local_path_key(url)
+            if key:
+                claimed.add(key)
+    return claimed
+
+
 def _is_checkpoint_entry(entry) -> bool:
     categories = entry.get("categories") or []
     return "checkpoints" in categories
@@ -113,6 +145,7 @@ def build_scanned_model_defs(
     *,
     prefix: str = SCANNED_ID_PREFIX,
     initialiser: Optional[Callable[[str, dict], dict]] = None,
+    claimed_paths=None,
 ) -> Dict[str, dict]:
     """Return ``{model_id: model_def}`` for scanned checkpoints resolvable to an installed model.
 
@@ -120,17 +153,22 @@ def build_scanned_model_defs(
     to an installed architecture (``available``) are registered. Disk ids always
     win: a scanned entry whose id would collide with ``disk_model_types`` is
     skipped. Two scanned files sharing a stem are disambiguated with a numeric
-    suffix.
+    suffix. ``claimed_paths`` (see :func:`claimed_scan_paths`) suppresses a
+    scanned entry whose weight file is already owned by a promoted finetune.
     """
     entries = index.get("entries", {}) if isinstance(index, dict) else index
     if isinstance(entries, dict):
         entries = entries.values()
     disk = set(disk_model_types or ())
+    claimed = set(claimed_paths or ())
     taken = set(disk)
     result: Dict[str, dict] = {}
     for entry in sorted(entries, key=lambda item: str(item.get("path", "")).casefold()):
         path = entry.get("path")
         if not path or not _is_checkpoint_entry(entry):
+            continue
+        if claimed and _local_path_key(path) in claimed:
+            # Already promoted to a (possibly renamed) disk finetune -> do not duplicate.
             continue
         resolution = amap.resolve_checkpoint(
             entry.get("signature"), ROLE_CHECKPOINT, model_infos, filename=path
@@ -183,3 +221,27 @@ def strip_scanned_models(models_def) -> int:
         models_def.pop(model_id, None)
         removed += 1
     return removed
+
+
+def inject_scanned_models(models_def, index, *, initialiser=None, prefix: str = SCANNED_ID_PREFIX) -> list:
+    """Strip then re-add scanned checkpoints from ``index`` into ``models_def`` (in place).
+
+    Pure orchestration shared by the application and the flow tests: it performs
+    no I/O and never writes a definition to disk. Previously injected entries are
+    removed first so dynamic models can never accumulate across refreshes, and
+    disk ids always win. Returns the list of scanned ids added.
+    """
+    strip_scanned_models(models_def)
+    if not index:
+        return []
+    model_infos = model_infos_from_models_def(models_def)
+    scanned_defs = build_scanned_model_defs(
+        index,
+        model_infos,
+        disk_model_types=set(models_def),
+        prefix=prefix,
+        initialiser=initialiser,
+        claimed_paths=claimed_scan_paths(models_def),
+    )
+    models_def.update(scanned_defs)
+    return list(scanned_defs)

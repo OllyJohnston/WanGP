@@ -339,14 +339,32 @@ def _role_guard(requested, entry, role):
     return role in roles
 
 
+def _category_guard(requested, entry, role):
+    """Locator-path guard: the request carries no role, so require the entry to be a
+    recognised weight file (checkpoints / text_encoders / vae), never an untyped one."""
+    return bool(_entry_roles(entry))
+
+
 def resolve_basename(file_name) -> Optional[str]:
-    """Conservative locator resolver: unique basename match only, no download side effects."""
+    """Conservative locator resolver: unique basename match only, no download side effects.
+
+    Unlike :func:`attempt_bind` this path has no caller-supplied role, so it is
+    deliberately strict: only header-safe weight containers are eligible, the
+    entry must belong to a recognised weight category, and when the request is a
+    remote URL its size must match before it will bind.
+    """
     if not is_bind_enabled():
+        return None
+    name = model_local_bind.basename_of(file_name)
+    if os.path.splitext(name)[1].lower() not in model_local_bind.BINDABLE_EXTENSIONS:
         return None
     mapping = get_basename_map()
     if not mapping:
         return None
-    result = model_local_bind.find_local_bind(file_name, mapping)
+    expected_size = remote_file_size(file_name) if _looks_remote(file_name) else None
+    result = model_local_bind.find_local_bind(
+        file_name, mapping, expected_size=expected_size, guard=_category_guard
+    )
     return result.path
 
 

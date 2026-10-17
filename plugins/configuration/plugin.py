@@ -352,7 +352,6 @@ class ConfigTabPlugin(WAN2GPPlugin):
                                 ("checkpoints", "Extra Diffusion Checkpoint Folders (One Path per Line)"),
                                 ("text_encoders", "Extra Text Encoder Folders (One Path per Line)"),
                                 ("vae", "Extra VAE Folders (One Path per Line)"),
-                                ("loras", "Extra LoRA Folders (One Path per Line)"),
                             )
                         ]
                         self.scan_bind_local_choice = gr.Checkbox(
@@ -1139,7 +1138,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
         else:
             checkpoints_paths = [path.strip() for path in checkpoints_paths_choice.replace("\r", "").split("\n") if len(path.strip()) > 0]
 
-        scan_paths = model_scan_config.normalize_scan_paths(dict(zip(model_scan_config.SCAN_CATEGORIES, scan_paths_values)))
+        scan_paths = model_scan_config.normalize_scan_paths(dict(zip(model_scan_config.LOOKUP_CATEGORIES, scan_paths_values)))
         scan_bind_local = model_scan_config.normalize_bind_local(scan_bind_local_value)
 
         video_output_error = validate_video_output_settings(video_output_codec_choice, video_container_choice, audio_output_codec_choice)

@@ -130,6 +130,34 @@ class FindBindTests(unittest.TestCase):
         result = mb.find_local_bind("A.safetensors", mapping)
         self.assertEqual(result.candidates, ("/m/A.safetensors",))
 
+    def test_refuses_pickle_containers(self):
+        for ext in (".ckpt", ".pt", ".pth", ".bin"):
+            with self.subTest(ext=ext):
+                mapping = mb.build_basename_map([_entry("/m/A" + ext)])
+                result = mb.find_local_bind("A" + ext, mapping)
+                self.assertFalse(result)
+                self.assertEqual(result.reason, mb.REASON_UNSAFE_FORMAT)
+
+    def test_pickle_refused_even_with_size_and_guard_satisfied(self):
+        mapping = mb.build_basename_map([_entry("/m/A.pt", size=999)])
+        result = mb.find_local_bind(
+            "A.pt", mapping, expected_size=999, guard=lambda r, e, role: True
+        )
+        self.assertFalse(result)
+        self.assertEqual(result.reason, mb.REASON_UNSAFE_FORMAT)
+
+    def test_allows_gguf(self):
+        mapping = mb.build_basename_map([_entry("/m/A.gguf")])
+        result = mb.find_local_bind("A.gguf", mapping)
+        self.assertTrue(result)
+        self.assertEqual(result.path, "/m/A.gguf")
+
+    def test_ignores_unsafe_candidate_when_safe_one_present(self):
+        mapping = mb.build_basename_map([_entry("/m/A.bin"), _entry("/n/A.safetensors")])
+        result = mb.find_local_bind("A.safetensors", mapping)
+        self.assertTrue(result)
+        self.assertEqual(result.path, "/n/A.safetensors")
+
 
 if __name__ == "__main__":
     unittest.main()
