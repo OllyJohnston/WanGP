@@ -3,6 +3,8 @@
 > **This is an unofficial community fork of [WanGP / Wan2GP](https://github.com/deepbeepmeep/Wan2GP), the project created and maintained by DeepBeepMeep.**
 >
 > It is **not affiliated with, endorsed by, or supported by DeepBeepMeep or the official WanGP project.** All credit for WanGP itself — every model, the low-VRAM engine, the interface, the plugins — belongs to DeepBeepMeep and the WanGP community. This fork tracks upstream and adds only the differences listed below. Find the official project at **[deepbeepmeep/Wan2GP](https://github.com/deepbeepmeep/Wan2GP)** or **[wangp.ai](https://wangp.ai/)**.
+>
+> **Jump to: [What's different](#-whats-different-from-upstream-wangp) · [How to install or upgrade](#-getting-wangp-enhanced)**
 
 -----
 <p align="center">
@@ -46,6 +48,68 @@ Tied-weights exports of the Qwen3 text encoder — where `lm_head.weight` is not
 ### 📄 Licensing and Attribution
 
 This fork is distributed under the same **WanGP Community License 2.0** as upstream (see [LICENSE.txt](LICENSE.txt)). It is a modified version of WanGP; the modifications are those described above, dated 16–17 October 2026. All upstream copyright, attribution and licence notices are preserved, and this fork claims no endorsement or affiliation with the WanGP project.
+
+## 📥 Getting WanGP Enhanced
+
+### New installs
+
+Follow the [Quick Start](#-quick-start) below, but clone this fork instead of upstream:
+
+```bash
+git clone https://github.com/OllyJohnston/WanGP.git
+cd WanGP
+```
+
+### Adding it to an existing WanGP install
+
+You do not need to reinstall. Pick either route.
+
+**Option A — track this fork as a git remote (recommended):**
+
+```bash
+git remote add enhanced https://github.com/OllyJohnston/WanGP.git
+git fetch enhanced
+git merge enhanced/main
+```
+
+`main` here is a superset of upstream, so while your install is not ahead of upstream this is a clean fast-forward. Your models, outputs, `wgp_config.json` and plugins are untouched.
+
+**Option B — apply the patch (no remote, one shot):**
+
+Download the `.patch` from the [Releases](../../releases) page and apply it:
+
+```bash
+git apply --check wangp-enhanced-v18.05-vs-af2ed29a.patch   # dry run
+git apply          wangp-enhanced-v18.05-vs-af2ed29a.patch
+```
+
+The patch is always generated against the upstream base commit recorded in [`UPSTREAM_BASE`](UPSTREAM_BASE) — currently `af2ed29a`, **WanGP v18.05**. It applies cleanly to exactly that revision; against a newer upstream, use `git apply -3` and expect a few conflicts to resolve by hand. Nothing else in your install is modified.
+
+### Non-git installs (Pinokio, plain folder copies, ...)
+
+Use the **overlay zip** from the [Releases](../../releases) page. It holds only the files this fork changes or adds, kept at their normal paths, so it can be extracted straight over your WanGP folder.
+
+### What each release contains
+
+| Asset | Purpose |
+| --- | --- |
+| `Source code (zip)` / `(tar.gz)` | GitHub's automatic archive of the tagged fork |
+| `wangp-enhanced-<version>.patch` | Apply to an existing install with `git apply` |
+| `wangp-enhanced-<version>-overlay.zip` | Drop-in files for a non-git install |
+
+### Regenerating the release assets (maintainers)
+
+The upstream base lives in one place: [`UPSTREAM_BASE`](UPSTREAM_BASE). After adding commits, rebuild both assets into the git-ignored `dist/` folder:
+
+```powershell
+scripts/make-patch.ps1          # Windows
+```
+
+```bash
+scripts/make-patch.sh           # Linux / macOS
+```
+
+Both emit an **LF-only** patch (a CRLF-rewritten patch fails `git apply` on every hunk) plus an overlay zip that preserves directory structure. Always `git apply --check` the result before publishing.
 
 ---
 
@@ -102,6 +166,7 @@ This fork is distributed under the same **WanGP Community License 2.0** as upstr
 ## 📋 Table of Contents
 
 - [🔀 What's Different from Upstream WanGP?](#-whats-different-from-upstream-wangp)
+- [📥 Getting WanGP Enhanced](#-getting-wangp-enhanced)
 - [🚀 Quick Start](#-quick-start)
 - [📦 Installation](#-installation)
 - [🎯 Usage](#-usage)
@@ -397,7 +462,7 @@ It is recommended to use in Pinokio the Community Scripts *wan2gp* or *wan2gp-am
 ### Manual installation: (for RTX20xx - RTX50xx)
 
 ```bash
-git clone https://github.com/deepbeepmeep/Wan2GP.git
+git clone https://github.com/OllyJohnston/WanGP.git
 cd Wan2GP
 conda create -n wan2gp python=3.11.14
 conda activate wan2gp
@@ -420,7 +485,7 @@ For optimized attention, install **SageAttention 1.0.6 on RTX 20XX** and **SageA
 ### Manual installation: (for GTX 10xx)
 
 ```bash
-git clone https://github.com/deepbeepmeep/Wan2GP.git
+git clone https://github.com/OllyJohnston/WanGP.git
 cd Wan2GP
 conda create -n wan2gp python=3.10.9
 conda activate wan2gp
