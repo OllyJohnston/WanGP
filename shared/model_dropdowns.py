@@ -699,6 +699,49 @@ def create_models_selector_hierarchy(deps, dropdown_types=None):
     return tree
 
 
+def _checkpoint_owner(deps, model_type):
+    """Follow a string ``"URLs": "<model_id>"`` inheritance chain to the checkpoint owner.
+
+    A model whose ``URLs`` is a string references another model (e.g.
+    ``krea2_turbo_edit`` -> ``krea2_turbo``) and reuses that model's weights, so it
+    shares that model's checkpoint/variant pool. Returns ``model_type`` itself when
+    it owns its checkpoint (``URLs`` is a list) or the chain is broken.
+    """
+    seen = set()
+    get_model_def = getattr(deps, "get_model_def", None)
+    if get_model_def is None:
+        return model_type
+    current = model_type
+    while current and current not in seen:
+        seen.add(current)
+        urls = (get_model_def(current) or {}).get("URLs")
+        if isinstance(urls, str) and urls and urls not in seen and get_model_def(urls) is not None:
+            current = urls
+        else:
+            break
+    return current
+
+
+def _append_shared_pool_variants(deps, base_model_type, finetunes, children_by_parent):
+    """Append the checkpoint owner's variants to a base type's level-3 choices.
+
+    When ``base_model_type`` inherits its checkpoint from a parent (string ``URLs``),
+    that parent's children (finetunes / scanned variants) also belong to this base
+    type, so the level-3 picker lists them too. The owner's own base entry is skipped.
+    """
+    owner = _checkpoint_owner(deps, base_model_type)
+    if owner == base_model_type:
+        return finetunes
+    seen = {value for _label, value in finetunes}
+    for entry in children_by_parent.get(owner, []):
+        label, value = entry[0], entry[1]
+        if value == owner or value in seen:
+            continue
+        seen.add(value)
+        finetunes.append((label, value, *entry[2:]))
+    return finetunes
+
+
 def get_sorted_dropdown(deps, dropdown_types, current_model_family, current_model_type, three_levels=True):
     models_families = [deps.get_model_family(t, for_ui=True) for t in dropdown_types]
     families = {}
@@ -720,7 +763,11 @@ def get_sorted_dropdown(deps, dropdown_types, current_model_family, current_mode
     if three_levels:
         dropdown_choices = [(*model[1:], deps.get_parent_model_type(model[2])) for model in dropdown_choices]
         sorted_choices, finetunes_dict = create_models_hierarchy(dropdown_choices)
-        return sorted_familes, sorted_choices, finetunes_dict[deps.get_parent_model_type(current_model_type)]
+        base_model_type = deps.get_parent_model_type(current_model_type)
+        finetunes = _append_shared_pool_variants(
+            deps, base_model_type, list(finetunes_dict.get(base_model_type, [])), finetunes_dict
+        )
+        return sorted_familes, sorted_choices, finetunes
     dropdown_types_list = list({deps.get_base_model_type(model[2]) for model in dropdown_choices})
     dropdown_choices = [model[1:] for model in dropdown_choices]
     return sorted_familes, dropdown_types_list, dropdown_choices
@@ -766,7 +813,10 @@ def change_model_family(deps, state, current_model_family):
         parent_model_type = deps.get_parent_model_type(model_type)
         dropdown_choices = [(*tup, deps.get_parent_model_type(tup[1])) for tup in dropdown_choices]
         dropdown_base_types_choices, finetunes_dict = create_models_hierarchy(dropdown_choices)
-        finetunes_dict[parent_model_type] = decorate_finetune_dropdown_choices(deps, finetunes_dict[parent_model_type])
+        finetunes = _append_shared_pool_variants(
+            deps, parent_model_type, list(finetunes_dict.get(parent_model_type, [])), finetunes_dict
+        )
+        finetunes_dict[parent_model_type] = decorate_finetune_dropdown_choices(deps, finetunes)
         dropdown_choices = decorate_dropdown_choices_with_status(finetunes_dict[parent_model_type], direct_status_map)
         dropdown_base_types_choices = decorate_dropdown_choices_with_status(dropdown_base_types_choices, aggregated_parent_status_map)
         model_finetunes_visible = len(dropdown_choices) > 1
@@ -784,7 +834,20 @@ def change_model_base_types(deps, state, current_model_family, model_base_type_c
         return gr.update()
     dropdown_types = get_filtered_dropdown_model_types(deps, get_model_output_filter(deps, state))
     current_family_name = deps.families_infos[current_model_family][1]
-    dropdown_choices = [(compact_name(current_family_name, deps.get_model_name(model_type)), model_type, model_base_type_choice) for model_type in dropdown_types if deps.get_parent_model_type(model_type) == model_base_type_choice and deps.get_model_family(model_type, for_ui=True) == current_model_family]
+    owner_model_type = _checkpoint_owner(deps, model_base_type_choice)
+    included_types = [
+        model_type for model_type in dropdown_types
+        if deps.get_model_family(model_type, for_ui=True) == current_model_family
+        and (
+            deps.get_parent_model_type(model_type) == model_base_type_choice
+            or (
+                owner_model_type != model_base_type_choice
+                and deps.get_parent_model_type(model_type) == owner_model_type
+                and deps.get_parent_model_type(model_type) != model_type
+            )
+        )
+    ]
+    dropdown_choices = [(compact_name(current_family_name, deps.get_model_name(model_type)), model_type, model_base_type_choice) for model_type in included_types]
     dropdown_choices = sorted(dropdown_choices, key=lambda c: c[0])
     _, finetunes_dict = create_models_hierarchy(dropdown_choices)
     base_dropdown_types = [choice[1] for choice in dropdown_choices]
