@@ -91,6 +91,9 @@ def default_cache_path(base_dir: str, cache_dir: str = INDEX_CACHE_DIR) -> str:
 DEFAULT_SCAN_TIMEOUT = 20.0
 
 _MAX_WARNINGS = 50
+# How many skipped-path warnings to spell out in the config UI status line
+# before collapsing the remainder into a "... and N more" row.
+STATUS_WARNING_LIMIT = 5
 
 _lock = threading.RLock()
 _state = {
@@ -306,6 +309,27 @@ def warm(timeout: Optional[float] = None):
     return get_index(force=True, timeout=timeout)
 
 
+def _dedupe_warnings(*collections) -> list:
+    """Merge warning lists preserving order, dropping duplicates (runtime + index overlap)."""
+    seen, merged = set(), []
+    for collection in collections:
+        for warning in collection or []:
+            if warning not in seen:
+                seen.add(warning)
+                merged.append(warning)
+    return merged
+
+
+def _render_warning_list(warnings) -> str:
+    """Escaped <ul> of skipped paths, capped at ``STATUS_WARNING_LIMIT`` with an overflow row."""
+    shown = warnings[:STATUS_WARNING_LIMIT]
+    rows = "".join(f"<li style='margin:0;'>{html.escape(str(warning))}</li>" for warning in shown)
+    remaining = len(warnings) - len(shown)
+    if remaining > 0:
+        rows += f"<li style='margin:0;color:#888;'>&hellip; and {remaining} more</li>"
+    return "<ul style='color:#c60;margin:6px 0 0 18px;padding:0;'>" + rows + "</ul>"
+
+
 def status_html() -> str:
     """Short HTML summary of the folder scan for the configuration UI status line."""
     info = status()
@@ -321,7 +345,7 @@ def status_html() -> str:
         parts.append(f"{stats.get('reused', 0)} cached")
     parts.append("local reuse ON" if info.get("bind") else "local reuse off")
     summary = ", ".join(parts) if parts else "not scanned yet"
-    warnings = list(stats.get("warnings") or []) + list(info.get("warnings") or [])
+    warnings = _dedupe_warnings(stats.get("warnings"), info.get("warnings"))
     colour = "#888"
     extra = ""
     if info.get("timed_out") or stats.get("timed_out"):
@@ -329,8 +353,11 @@ def status_html() -> str:
         extra += " &mdash; scan timed out, still running in the background"
     if warnings:
         colour = "#c60"
-        extra += f" &mdash; {len(warnings)} warning(s); see the terminal log"
-    return f"<div style='color:{colour};'>Folder scan: {html.escape(summary)}{extra}.</div>"
+        extra += f" &mdash; {len(warnings)} path(s) skipped"
+    block = f"<div style='color:{colour};'>Folder scan: {html.escape(summary)}{extra}.</div>"
+    if warnings:
+        block += _render_warning_list(warnings)
+    return block
 
 
 # The scan category a file was found under is authoritative for its role, so we
