@@ -708,7 +708,10 @@ def get_sorted_dropdown(deps, dropdown_types, current_model_family, current_mode
 
     families_orders = [deps.families_infos[family][0] for family in families]
     families_labels = [deps.families_infos[family][1] for family in families]
-    sorted_familes = [info[1:] for info in sorted(zip(families_orders, families_labels, families), key=lambda c: c[0])]
+    # Family dropdown is ordered A-Z by display label (case-insensitive), not by the
+    # configured family-order key. This only reorders the presented choices; the
+    # model hierarchy/definitions are never mutated.
+    sorted_familes = [info[1:] for info in sorted(zip(families_orders, families_labels, families), key=lambda c: c[1].casefold())]
     if current_model_family is None:
         dropdown_choices = [(deps.families_infos[family][0], deps.get_model_name(model_type), model_type) for model_type, family in zip(dropdown_types, models_families)]
     else:
