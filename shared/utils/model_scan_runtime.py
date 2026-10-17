@@ -16,6 +16,7 @@ so the module can be unit tested without the ML runtime.
 """
 from __future__ import annotations
 
+import html
 import importlib
 import importlib.util
 import os
@@ -28,23 +29,39 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _load_sibling(name):
-    """Load a sibling module by path and register it under its short name."""
-    if name in sys.modules:
-        return sys.modules[name]
+    """Load a sibling module by path, keeping a single identity under both the
+    canonical ``shared.utils.<name>`` key and the short ``<name>`` alias."""
+    canonical = "shared.utils." + name
+    if canonical in sys.modules:
+        return sys.modules[canonical]
+    existing = sys.modules.get(name)
+    if existing is not None:
+        # Adopt an already-loaded short-name module so we never create a shadow copy.
+        sys.modules[canonical] = existing
+        return existing
     module_path = os.path.join(_THIS_DIR, name + ".py")
-    spec = importlib.util.spec_from_file_location(name, module_path)
+    spec = importlib.util.spec_from_file_location(canonical, module_path)
     module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
+    sys.modules[canonical] = module
+    sys.modules.setdefault(name, module)
     spec.loader.exec_module(module)
     return module
 
 
 def _import(name):
-    """Prefer the canonical package module (identity with the app), else load by path."""
+    """Prefer the canonical package module (identity with the app), else load by path.
+
+    Only an inability to import the package module triggers the path fallback; a
+    real error inside a sibling (e.g. ``SyntaxError``) propagates instead of being
+    masked by a shadow module. Both paths leave the module reachable under the
+    canonical name and the short-name alias, pointing at the same object.
+    """
     try:
-        return importlib.import_module("shared.utils." + name)
-    except Exception:
-        return _load_sibling(name)
+        module = importlib.import_module("shared.utils." + name)
+    except ImportError:
+        module = _load_sibling(name)
+    sys.modules.setdefault(name, module)
+    return module
 
 
 model_scanner = _import("model_scanner")
@@ -313,7 +330,7 @@ def status_html() -> str:
     if warnings:
         colour = "#c60"
         extra += f" &mdash; {len(warnings)} warning(s); see the terminal log"
-    return f"<div style='color:{colour};'>Folder scan: {summary}{extra}.</div>"
+    return f"<div style='color:{colour};'>Folder scan: {html.escape(summary)}{extra}.</div>"
 
 
 # The scan category a file was found under is authoritative for its role, so we
