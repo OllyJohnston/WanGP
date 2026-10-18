@@ -1,0 +1,8 @@
+# Upstream WanGP commit that WanGP Enhanced is based on.
+#
+# Single source of truth: scripts/make-patch.ps1 and scripts/make-patch.sh read
+# the first non-comment line below, so the fork's release assets and the README
+# always agree on which upstream revision the patches apply to.
+#
+# Update this whenever you rebase onto a newer upstream, then re-run the script.
+de302ee
